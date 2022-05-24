@@ -1,0 +1,399 @@
+<?php
+
+//Hook de edición de ficha de usuario
+function efor_msauth_form_alter(&$form, &$form_state, $form_id) {
+
+    if ($form_id === 'user_profile_form') {
+
+      //Ocultamos los campos sincronizados con AD si se ha logueado con este método
+      if (isset($_SESSION["efor_msauth_autenticado_ad"])) {
+
+        global $user;
+
+        if (($_SESSION["efor_msauth_autenticado_ad"] == 1) && (intval($form['#user']->uid) == $user->uid)) {
+
+          hide($form['account']['mail']);
+          hide($form['account']['name']);
+          hide($form['account']['pass']);
+          hide($form['account']['current_pass_required_values']);
+          hide($form['account']['current_pass']);
+
+          if (isset($form['picture'])) { hide($form['picture']); }
+          if (isset($form['field_nombre'])) { hide($form['field_nombre']); }
+          if (isset($form['field_apellidos'])) { hide($form['field_apellidos']); }
+
+        }
+      }
+    }
+}
+
+//Páginas administrativas y declaración de endpoints
+function efor_msauth_menu() {
+
+  $items['admin/config/system/efor_msauth'] = array(
+    'title' => 'Servicios de autenticación Microsoft (Azure AD)',
+    'description' => 'Parámetros de configuración de los servicios de autenticación Microsoft (Azure AD)',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('efor_msauth_form_config'),
+    'access callback' => 'user_access',
+    'type' => MENU_NORMAL_ITEM,
+    'access arguments' => array('administer site configuration'),
+  );
+
+  $items['efor_msauth/login'] = array(
+    'page callback' => 'efor_msauth_login',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['efor_msauth/callback'] = array(
+    'page callback' => 'efor_msauth_callback',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+//Pantalla administrativa de configuración del módulo
+function efor_msauth_form_config(){
+
+  global $base_path;
+
+  $efor_msauth_client_id = variable_get('efor_msauth_client_id', NULL);
+  $efor_msauth_client_secret = variable_get('efor_msauth_client_secret', NULL);
+  $efor_msauth_creacion_usuarios = variable_get('efor_msauth_creacion_usuarios', 0);
+
+  $form = array();
+
+  $form['configuracion_aplicacion'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Configuración de aplicación'),
+    '#description' => t('Datos de configuración de la aplicación Azure AD'),
+    '#collapsed' => FALSE,
+  );
+
+  $form['configuracion_aplicacion']['efor_msauth_client_id'] = array(
+    '#type'          => 'textfield',
+    '#description'   => t('ID de cliente de la aplicación'),
+    '#title'         => t('Client ID:'),
+    '#default_value' => $efor_msauth_client_id,
+    '#required'      => TRUE,
+  );
+
+  $form['configuracion_aplicacion']['efor_msauth_client_secret'] = array(
+    '#type'          => 'textfield',
+    '#description'   => t('Clave de cliente de la aplicación'),
+    '#title'         => t('Client Secret:'),
+    '#default_value' => $efor_msauth_client_secret,
+    '#required'      => TRUE,
+  );
+
+  $form['configuracion_aplicacion']['efor_msauth_redirect_uri'] = array(
+    '#type'          => 'markup',
+    '#markup'        => '<b>IMPORTANTE</b>: En la pantalla de configuración de la aplicación Azure AD deberá indicar la siguiente URI de redirección: <b>' . (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . $base_path . "efor_msauth/callback</b>",
+  );
+
+  $form['modo_funcionamiento'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Modo de funcionamiento'),
+    '#description' => t('Configuración del modo de comportamiento en el matcheo de usuarios de Drupal'),
+    '#collapsed' => FALSE,
+  );
+
+  $form['modo_funcionamiento']['efor_msauth_creacion_usuarios'] = array(
+    '#type'          => 'select',
+    '#title'   => t('Creación de nuevos usuarios'),
+    '#description'   => t('Comportamiento al recibir nuevos usuarios de Azure AD que no se encuentren en activos el sistema'),
+    '#default_value' => $efor_msauth_creacion_usuarios,
+    '#options' => array(
+      '0' => t('No se crean nuevos usuarios'),
+      '1' => t('Se crearán nuevos usuarios en base a los recibidos desde Azure AD'),
+    ),
+    '#required'      => TRUE,
+  );
+
+
+  $form['submit'] = array(
+    '#type'   => 'submit',
+    '#value'  => t('Save'),
+  );
+
+  return $form;
+}
+function efor_msauth_form_config_submit($form, &$form_state) {
+
+  variable_set('efor_msauth_client_id', $form_state['values']['efor_msauth_client_id']);
+  variable_set('efor_msauth_client_secret', $form_state['values']['efor_msauth_client_secret']);
+  variable_set('efor_msauth_creacion_usuarios', $form_state['values']['efor_msauth_creacion_usuarios']);
+
+  drupal_set_message('Datos de configuración actualizados correctamente');
+}
+
+//Endpoints de autenticación y recepción de datos
+function efor_msauth_login() {
+
+  global $base_path;
+
+  //Generamos un número específico para esta sesión
+  $_SESSION['state'] = random_int(1, 200000);
+
+  //Cargamos los parámetros necesarios
+  $parameters = [
+    'client_id' => variable_get('efor_msauth_client_id', NULL),
+    'response_type' => 'code',
+    'redirect_uri' => (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . $base_path . "efor_msauth/callback",
+    'response_mode' => 'query',
+    'scope' => 'user.read',
+    'state' => $_SESSION['state']
+  ];
+
+  //Enviamos al usuario al login de Microsoft
+  drupal_goto("https://login.microsoftonline.com/common/oauth2/v2.0/authorize", array('query' => $parameters));
+
+}
+function efor_msauth_callback() {
+
+  global $base_path;
+
+  $code = "";
+  $state = "";
+
+  //Parámetros que esperamos recibir...
+  if (isset($_GET["code"])) { $code = $_GET["code"]; }
+  if (isset($_GET["state"])) { $state = $_GET["state"]; }
+
+  if ($_SESSION['state'] == $state) {
+
+    //Variables para hacer la petición
+    $efor_msauth_client_id = variable_get('efor_msauth_client_id', NULL);
+    $efor_msauth_client_secret = variable_get('efor_msauth_client_secret', NULL);
+    $efor_msauth_redirect_uri = urlencode((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? "https" : "http") . "://" . $_SERVER['HTTP_HOST'] . $base_path . "efor_msauth/callback");
+
+    //Comprobamos que lo obtenemos correctamente
+    if ($token = efor_msauth_canjear_token($efor_msauth_client_id, $efor_msauth_client_secret, $efor_msauth_redirect_uri, $code)) {
+
+      //Extraemos los datos del usuario
+      $datosUsuario = efor_msauth_extraer_usuario($token);
+
+      $nombre = (isset($datosUsuario->givenName) ? $datosUsuario->givenName : "");
+      $apellidos = (isset($datosUsuario->surname) ? $datosUsuario->surname : "");
+      $nombreCompleto = (isset($datosUsuario->displayName) ? $datosUsuario->displayName : "");
+      $userPrincipalName = (isset($datosUsuario->userPrincipalName) ? $datosUsuario->userPrincipalName : "");
+      $mail = (isset($datosUsuario->mail) ? $datosUsuario->mail : $userPrincipalName);
+      $id = (isset($datosUsuario->id) ? $datosUsuario->id : "");
+
+      if ($mail) {
+
+        //Buscamos un usuario con ese email
+        if ($uid = efor_msauth_devolver_usuario_drupal($mail)) {
+
+          //Actualizamos los campos con los valores obtenidos desde AD
+          efor_msauth_actualizar_usuario_drupal($uid, $nombre, $apellidos);
+
+          //Actualizamos la imagen del usuario (si aplica)
+          if (variable_get('user_pictures', 0)) { efor_msauth_actualizar_imagen_usuario_drupal($uid, $id, $token); }
+
+          //Autenticamos al usuario sin contraseña
+          efor_msauth_autenticar_usuario_drupal($uid);
+
+          //Marcamos al usuario como identificado desde AD
+          $_SESSION["efor_msauth_autenticado_ad"] = 1;
+
+          drupal_set_message("Usuario identificado correctamente", "status");
+
+        } else {
+
+          $efor_msauth_creacion_usuarios = variable_get('efor_msauth_creacion_usuarios', 0);
+
+          if ($efor_msauth_creacion_usuarios) {
+
+            //Creamos el usuario
+            $uid = efor_msauth_crear_usuario_drupal($mail, $nombre, $apellidos);
+
+            //Actualizamos la imagen del usuario (si aplica)
+            if (variable_get('user_pictures', 0)) { efor_msauth_actualizar_imagen_usuario_drupal($uid, $id, $token); }
+
+            //Autenticamos al usuario sin contraseña
+            efor_msauth_autenticar_usuario_drupal($uid);
+
+            //Marcamos al usuario como identificado desde AD
+            $_SESSION["efor_msauth_autenticado_ad"] = 1;
+
+            watchdog('efor_msauth', 'Creado un nuevo usuario en el sistema para "' . $mail . '"' , NULL, WATCHDOG_INFO);
+            drupal_set_message("Se ha creado un usuario asociado a su cuenta Microsoft", "status");
+
+          } else {
+
+            //Usuario no existe y no se permite la creación de nuevos registros...
+            watchdog('efor_msauth', 'El usuario no existe en el sistema y no se permite la creación de nuevos registros' , NULL, WATCHDOG_ERROR);
+            drupal_set_message("No existe ningun usuario en el sistema asociado a esa cuenta", "error");
+          }
+        }
+
+      } else {
+
+        watchdog('efor_msauth', 'El usuario no dispone de correo electrónico' , NULL, WATCHDOG_ERROR);
+        drupal_set_message("Error en el proceso de autenticación", "error");
+      }
+
+    } else {
+
+      watchdog('efor_msauth', 'Error al obtener el token de autenticación' , NULL, WATCHDOG_ERROR);
+      drupal_set_message("Error en el proceso de autenticación", "error");
+    }
+
+  } else {
+
+    watchdog('efor_msauth', 'El parámetro "state" no coincide entre peticiones' , NULL, WATCHDOG_ERROR);
+    drupal_set_message("Error en el proceso de autenticación", "error");
+  }
+
+  //Enviamos de nuevo al usuario a la Home con la respuesta de su autenticación
+  drupal_goto("/");
+
+}
+
+//Funciones de comunicación con Microsoft Graph
+function efor_msauth_canjear_token($efor_msauth_client_id, $efor_msauth_client_secret, $efor_msauth_redirect_uri, $code) {
+
+  $curl = curl_init();
+
+  curl_setopt_array($curl, array(
+    CURLOPT_URL => 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_ENCODING => '',
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_TIMEOUT => 0,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+    CURLOPT_CUSTOMREQUEST => 'GET',
+    CURLOPT_POSTFIELDS => 'client_id=' . $efor_msauth_client_id . '&scope=user.read&code=' . $code . '&redirect_uri=' . $efor_msauth_redirect_uri .  '&grant_type=authorization_code&client_secret=' . $efor_msauth_client_secret,
+    CURLOPT_HTTPHEADER => array(
+    'Content-Type: application/x-www-form-urlencoded',
+    ),
+  ));
+
+  $response = curl_exec($curl);
+  curl_close($curl);
+
+  $datos = json_decode($response);
+
+  return (isset($datos->access_token) ? $datos->access_token : "");
+}
+function efor_msauth_extraer_usuario($token) {
+
+  $curl = curl_init();
+
+  curl_setopt_array($curl, array(
+    CURLOPT_URL => 'https://graph.microsoft.com/v1.0/me',
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_ENCODING => '',
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_TIMEOUT => 0,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+    CURLOPT_CUSTOMREQUEST => 'GET',
+    CURLOPT_HTTPHEADER => array(
+    'Authorization: Bearer ' . $token,
+    ),
+  ));
+
+  $response = curl_exec($curl);
+  curl_close($curl);
+
+  return json_decode($response);
+}
+function efor_msauth_extraer_imagen_usuario($id, $token) {
+
+  $curl = curl_init();
+
+  curl_setopt_array($curl, array(
+    CURLOPT_URL => 'https://graph.microsoft.com/v1.0/users/' . $id . '/photo/$value',
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_ENCODING => '',
+    CURLOPT_MAXREDIRS => 10,
+    CURLOPT_TIMEOUT => 0,
+    CURLOPT_FOLLOWLOCATION => true,
+    CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+    CURLOPT_CUSTOMREQUEST => 'GET',
+    CURLOPT_HTTPHEADER => array(
+    'Authorization: Bearer ' . $token,
+    ),
+  ));
+
+  $response = curl_exec($curl);
+  curl_close($curl);
+
+  return $response;
+
+}
+
+//Funciones de manejo de datos de Drupal
+function efor_msauth_devolver_usuario_drupal($mail) {
+
+  //Buscamos en BD el usuario solicitado...
+  $uid = db_query('SELECT `uid` FROM `users` where `mail` = :mail', array(':mail' => $mail))->fetchField();
+
+  return ($uid != null ? $uid : "");
+}
+function efor_msauth_autenticar_usuario_drupal($uid) {
+
+  global $user;
+  $user = user_load($uid);
+
+  $login_array = array ('name' => $user->name);
+  user_login_finalize($login_array);
+}
+function efor_msauth_crear_usuario_drupal($mail, $nombre, $apellidos) {
+
+  //Campos de usuario en base a credenciales de AD
+  $camposUsuario = array(
+
+    'name' => $mail,
+    'mail' => $mail,
+    'pass' => user_password(),
+
+    'roles' => array(
+      DRUPAL_AUTHENTICATED_RID => 'authenticated user',),
+
+    'init' => $mail,
+    'status' => 1,
+    'timezone' => variable_get('date_default_timezone', ''),
+    'signature_format' => 'filtered_html',
+    'language' => 'es',
+
+    'field_nombre' => array(LANGUAGE_NONE => array(0 => array('value' => $nombre))),
+    'field_apellidos' => array(LANGUAGE_NONE => array(0 => array('value' => $apellidos))),
+  );
+
+  //Creamos el usuario en Drupal
+  $usuario = user_save('', $camposUsuario);
+
+  return $usuario->uid;
+}
+function efor_msauth_actualizar_usuario_drupal($uid, $nombre, $apellidos) {
+
+  $usuario = user_load($uid);
+
+  if (isset($usuario->field_nombre)) { $usuario->field_nombre['und'][0]['value'] = $nombre; }
+  if (isset($usuario->field_apellidos)) { $usuario->field_apellidos['und'][0]['value'] = $apellidos; }
+
+  user_save($usuario);
+}
+function efor_msauth_actualizar_imagen_usuario_drupal($uid, $id, $token) {
+
+  //Extraemos y actualizamos la imagen del usuario si se obtiene correctamente
+  $imagen = efor_msauth_extraer_imagen_usuario($id, $token);
+
+  if (strpos($imagen, "error") === false) {
+
+    $ruta = "public://pictures/" . $id . ".jpg";
+    $fid = file_save_data($imagen, $ruta);
+
+    $usuario = user_load($uid);
+    $usuario->picture = $fid;
+
+    user_save($usuario);
+  }
+}
